@@ -791,6 +791,7 @@ notenoughargs:
 usage:
         printf("usage:\n");
         printf("%s aspaces\n", argv[0].str);
+        printf("%s regions\n", argv[0].str);
         printf("%s alloc <size> <align_pow2>\n", argv[0].str);
         printf("%s alloc_physical <paddr> <size> <align_pow2>\n", argv[0].str);
         printf("%s alloc_contig <size> <align_pow2>\n", argv[0].str);
@@ -811,6 +812,12 @@ usage:
         list_for_every_entry(&aspace_list, a, vmm_aspace_t, node) {
             dump_aspace(a);
         }
+    } else if (!strcmp(argv[1].str, "regions")) {
+      vmm_region_t *last = NULL;
+      list_for_every_entry(&vmm_get_kernel_aspace()->region_list, last,
+                           vmm_region_t, node) {
+        printf("%s 0x%lx %zu\n", last->name, last->base, last->size);
+      }
     } else if (!strcmp(argv[1].str, "alloc")) {
         if (argc < 4) goto notenoughargs;
 
