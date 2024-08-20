@@ -1,3 +1,4 @@
+#include "arch/mmu.h"
 #include "boot_service.h"
 #include "boot_service_provider.h"
 #include "defer.h"
@@ -28,10 +29,51 @@ constexpr auto EFI_SYSTEM_TABLE_SIGNATURE =
 
 using EfiEntry = int (*)(void *, struct EfiSystemTable *);
 
-void *alloc_page(size_t size) {
+vmm_aspace_t *get_address_space() {
+  static vmm_aspace_t *aspace = nullptr;
+  if (aspace == nullptr) {
+    auto err = vmm_create_aspace(&aspace, "linux_kernel", 0);
+    if (err) {
+      printf("Failed to create address space for linux kernel %d\n", err);
+      return nullptr;
+    }
+    vmm_set_active_aspace(aspace);
+  }
+  return aspace;
+}
+
+void *identity_map(void *addr, size_t size) {
+  memset(addr, 0, size);
+  auto vaddr = reinterpret_cast<vaddr_t>(addr);
+  paddr_t pa{};
+  uint flags{};
+  auto aspace = get_address_space();
+  auto err = arch_mmu_query(&aspace->arch_aspace, vaddr, &pa, &flags);
+  if (err) {
+    printf("Failed to query physical address for memory 0x%p\n", addr);
+    return nullptr;
+  }
+
+  err = arch_mmu_unmap(&aspace->arch_aspace, vaddr, size / PAGE_SIZE);
+  if (err) {
+    printf("Failed to unmap virtual address %p\n", vaddr);
+    return nullptr;
+  }
+  arch_mmu_map(&aspace->arch_aspace, pa, pa, size / PAGE_SIZE, flags);
+  if (err) {
+    printf("Failed to identity map physical address %p\n", pa);
+    return nullptr;
+  }
+  printf("Identity mapped physical address %p flags 0x%x\n", pa, flags);
+
+  return reinterpret_cast<void *>(pa);
+}
+
+void *alloc_page(size_t size, size_t align_log2) {
+  auto aspace = get_address_space();
   void *vptr{};
-  status_t err =
-      vmm_alloc(vmm_get_kernel_aspace(), "uefi_program", size, &vptr, 12, 0, 0);
+  status_t err = vmm_alloc_contiguous(aspace, "uefi_program", size, &vptr,
+                                      align_log2, 0, 0);
   if (err) {
     printf("Failed to allocate memory for uefi program %d\n", err);
     return nullptr;
@@ -39,19 +81,21 @@ void *alloc_page(size_t size) {
   return vptr;
 }
 
-void *alloc_page(void *addr, size_t size) {
+void *alloc_page(void *addr, size_t size, size_t align_log2 = PAGE_SIZE_SHIFT) {
   if (addr == nullptr) {
-    return alloc_page(size);
+    return identity_map(alloc_page(size, align_log2), size);
   }
-  auto err = vmm_alloc(vmm_get_kernel_aspace(), "uefi_program", size, &addr,
-                       PAGE_SIZE_SHIFT, VMM_FLAG_VALLOC_SPECIFIC, 0);
+  auto err =
+      vmm_alloc_contiguous(get_address_space(), "uefi_program", size, &addr,
+                           align_log2, VMM_FLAG_VALLOC_SPECIFIC, 0);
   if (err) {
-    printf("Failed to allocate memory for uefi program @ fixed address %p %d , "
-           "falling back to non-fixed allocation\n",
-           addr, err);
-    return alloc_page(size);
+    printf(
+        "Failed to allocate memory for uefi program @ fixed address 0x%p %d , "
+        "falling back to non-fixed allocation\n",
+        addr, err);
+    return identity_map(alloc_page(size, align_log2), size);
   }
-  return addr;
+  return identity_map(addr, size);
 }
 
 template <typename T> void fill(T *data, size_t skip, uint8_t begin = 0) {
@@ -265,8 +309,9 @@ int load_sections_and_execute(bdev_t *dev,
   const auto &last_section = section_header[sections - 1];
   const auto virtual_size =
       last_section.VirtualAddress + last_section.Misc.VirtualSize;
-  const auto image_base = reinterpret_cast<char *>(alloc_page(
-      reinterpret_cast<void *>(optional_header->ImageBase), virtual_size));
+  const auto image_base = reinterpret_cast<char *>(
+      alloc_page(reinterpret_cast<void *>(optional_header->ImageBase),
+                 virtual_size, 21 /* Kernel requires 2MB alignment */));
   if (image_base == nullptr) {
     return -7;
   }

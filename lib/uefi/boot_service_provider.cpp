@@ -98,13 +98,13 @@ EfiStatus get_memory_map(size_t *memory_map_size,
     memory_map[i].virtual_start = region->base;
     memory_map[i].physical_start = memory_map[i].virtual_start;
     memory_map[i].number_of_pages = region->size / PAGE_SIZE;
-    // paddr_t pa{};
-    // uint flags{};
-    // status_t err =
-    //     arch_mmu_query(&aspace->arch_aspace, region->base, &pa, &flags);
-    // if (err >= 0) {
-    //   memory_map[i].physical_start = pa;
-    // }
+    paddr_t pa{};
+    uint flags{};
+    status_t err =
+        arch_mmu_query(&aspace->arch_aspace, region->base, &pa, &flags);
+    if (err >= 0) {
+      memory_map[i].physical_start = pa;
+    }
     i++;
   }
 
