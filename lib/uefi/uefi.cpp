@@ -19,6 +19,7 @@
 #include "protocols/simple_text_output_protocol.h"
 #include "runtime_service.h"
 #include "runtime_service_provider.h"
+#include "switch_stack.h"
 #include "system_table.h"
 #include "text_protocol.h"
 
@@ -56,15 +57,15 @@ void *identity_map(void *addr, size_t size) {
 
   err = arch_mmu_unmap(&aspace->arch_aspace, vaddr, size / PAGE_SIZE);
   if (err) {
-    printf("Failed to unmap virtual address %p\n", vaddr);
+    printf("Failed to unmap virtual address 0x%lx\n", vaddr);
     return nullptr;
   }
   arch_mmu_map(&aspace->arch_aspace, pa, pa, size / PAGE_SIZE, flags);
   if (err) {
-    printf("Failed to identity map physical address %p\n", pa);
+    printf("Failed to identity map physical address 0x%lx\n", pa);
     return nullptr;
   }
-  printf("Identity mapped physical address %p flags 0x%x\n", pa, flags);
+  printf("Identity mapped physical address 0x%lx flags 0x%x\n", pa, flags);
 
   return reinterpret_cast<void *>(pa);
 }
@@ -326,8 +327,8 @@ int load_sections_and_execute(bdev_t *dev,
   printf("Relocating image from 0x%llx to %p\n", optional_header->ImageBase,
          image_base);
   relocate_image(image_base);
-  auto entry = reinterpret_cast<EfiEntry>(image_base +
-                                          optional_header->AddressOfEntryPoint);
+  auto entry = reinterpret_cast<int (*)(void *, void *)>(
+      image_base + optional_header->AddressOfEntryPoint);
   printf("Entry function located at %p\n", entry);
 
   EfiSystemTable table{};
@@ -342,6 +343,11 @@ int load_sections_and_execute(bdev_t *dev,
   table.header.signature = EFI_SYSTEM_TABLE_SIGNATURE;
   EfiSimpleTextOutputProtocol console_out = get_text_output_protocol();
   table.con_out = &console_out;
+  constexpr size_t kStackSize = 1024ul * 1024;
+  auto stack = alloc_page(kStackSize, PAGE_SIZE);
+  memset(stack, 0, kStackSize);
+  call_with_stack(stack+kStackSize, entry, image_base, &table);
+
   return entry(image_base, &table);
 }
 
