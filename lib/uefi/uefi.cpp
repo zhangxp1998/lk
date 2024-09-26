@@ -11,11 +11,13 @@
 #include <lk/debug.h>
 #include <lk/err.h>
 #include <lk/trace.h>
+#include <math.h>
 #include <platform.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 
+#include "configuration_table.h"
 #include "protocols/simple_text_output_protocol.h"
 #include "runtime_service.h"
 #include "runtime_service_provider.h"
@@ -29,75 +31,6 @@ constexpr auto EFI_SYSTEM_TABLE_SIGNATURE =
 // ASCII "PE\x0\x0"
 
 using EfiEntry = int (*)(void *, struct EfiSystemTable *);
-
-vmm_aspace_t *get_address_space() {
-  static vmm_aspace_t *aspace = nullptr;
-  if (aspace == nullptr) {
-    auto err = vmm_create_aspace(&aspace, "linux_kernel", 0);
-    if (err) {
-      printf("Failed to create address space for linux kernel %d\n", err);
-      return nullptr;
-    }
-    vmm_set_active_aspace(aspace);
-  }
-  return aspace;
-}
-
-void *identity_map(void *addr, size_t size) {
-  memset(addr, 0, size);
-  auto vaddr = reinterpret_cast<vaddr_t>(addr);
-  paddr_t pa{};
-  uint flags{};
-  auto aspace = get_address_space();
-  auto err = arch_mmu_query(&aspace->arch_aspace, vaddr, &pa, &flags);
-  if (err) {
-    printf("Failed to query physical address for memory 0x%p\n", addr);
-    return nullptr;
-  }
-
-  err = arch_mmu_unmap(&aspace->arch_aspace, vaddr, size / PAGE_SIZE);
-  if (err) {
-    printf("Failed to unmap virtual address 0x%lx\n", vaddr);
-    return nullptr;
-  }
-  arch_mmu_map(&aspace->arch_aspace, pa, pa, size / PAGE_SIZE, flags);
-  if (err) {
-    printf("Failed to identity map physical address 0x%lx\n", pa);
-    return nullptr;
-  }
-  printf("Identity mapped physical address 0x%lx flags 0x%x\n", pa, flags);
-
-  return reinterpret_cast<void *>(pa);
-}
-
-void *alloc_page(size_t size, size_t align_log2) {
-  auto aspace = get_address_space();
-  void *vptr{};
-  status_t err = vmm_alloc_contiguous(aspace, "uefi_program", size, &vptr,
-                                      align_log2, 0, 0);
-  if (err) {
-    printf("Failed to allocate memory for uefi program %d\n", err);
-    return nullptr;
-  }
-  return vptr;
-}
-
-void *alloc_page(void *addr, size_t size, size_t align_log2 = PAGE_SIZE_SHIFT) {
-  if (addr == nullptr) {
-    return identity_map(alloc_page(size, align_log2), size);
-  }
-  auto err =
-      vmm_alloc_contiguous(get_address_space(), "uefi_program", size, &addr,
-                           align_log2, VMM_FLAG_VALLOC_SPECIFIC, 0);
-  if (err) {
-    printf(
-        "Failed to allocate memory for uefi program @ fixed address 0x%p %d , "
-        "falling back to non-fixed allocation\n",
-        addr, err);
-    return identity_map(alloc_page(size, align_log2), size);
-  }
-  return identity_map(addr, size);
-}
 
 template <typename T> void fill(T *data, size_t skip, uint8_t begin = 0) {
   auto ptr = reinterpret_cast<char *>(data);
@@ -122,7 +55,7 @@ static constexpr size_t BIT10 = 1 << 10;
   @return Immediate address encoded in the instruction
 
 **/
-uint16_t ThumbMovtImmediateAddress(uint16_t *Instruction) {
+uint16_t ThumbMovtImmediateAddress(const uint16_t *Instruction) {
   uint32_t Movt;
   uint16_t Address;
 
@@ -331,11 +264,11 @@ int load_sections_and_execute(bdev_t *dev,
       image_base + optional_header->AddressOfEntryPoint);
   printf("Entry function located at %p\n", entry);
 
-  EfiSystemTable table{};
+  EfiSystemTable &table = *static_cast<EfiSystemTable *>(alloc_page(PAGE_SIZE));
   EfiBootService boot_service{};
   EfiRuntimeService runtime_service{};
   fill(&runtime_service, 0);
-  // fill(&boot_service, 0);
+  fill(&boot_service, 0);
   setup_runtime_service_table(&runtime_service);
   setup_boot_service_table(&boot_service);
   table.runtime_service = &runtime_service;
@@ -343,10 +276,16 @@ int load_sections_and_execute(bdev_t *dev,
   table.header.signature = EFI_SYSTEM_TABLE_SIGNATURE;
   EfiSimpleTextOutputProtocol console_out = get_text_output_protocol();
   table.con_out = &console_out;
-  constexpr size_t kStackSize = 1024ul * 1024;
-  auto stack = alloc_page(kStackSize, PAGE_SIZE);
+  table.configuration_table =
+      reinterpret_cast<EfiConfigurationTable *>(alloc_page(PAGE_SIZE));
+  setup_configuration_table(&table);
+
+  constexpr size_t kStackSize = 8 * 1024ul * 1024;
+  auto stack = reinterpret_cast<char *>(alloc_page(kStackSize, 23));
   memset(stack, 0, kStackSize);
-  call_with_stack(stack+kStackSize, entry, image_base, &table);
+  printf("Calling kernel using custom stack 0x%lx system_table 0x%lx\n", stack,
+         &table);
+  call_with_stack(stack + kStackSize, entry, image_base, &table);
 
   return entry(image_base, &table);
 }
@@ -373,8 +312,9 @@ int load_pe_file(const char *blkdev) {
     return -2;
   }
   if (dos_header->e_lfanew > kBlocKSize - sizeof(IMAGE_FILE_HEADER)) {
-    printf("Invalid PE header offset %d exceeds maximum read size of %zu - %zu\n",
-           dos_header->e_lfanew, kBlocKSize, sizeof(IMAGE_FILE_HEADER));
+    printf(
+        "Invalid PE header offset %d exceeds maximum read size of %zu - %zu\n",
+        dos_header->e_lfanew, kBlocKSize, sizeof(IMAGE_FILE_HEADER));
     return -3;
   }
   const auto pe_header = dos_header->GetPEHeader();
