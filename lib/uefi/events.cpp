@@ -21,6 +21,7 @@
 #include <kernel/mutex.h>
 #include <kernel/thread.h>
 #include <lk/err.h>
+#include <lk/list.h>
 #include <lk/trace.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,30 +31,39 @@
 #define LOCAL_TRACE 0
 
 namespace {
-constexpr size_t kMaxEventCount = 16;
-struct {
- public:
-  template <typename Func>
-  void read_access(Func f) const {
-    AutoLock a(&m);
-    f(arr, events);
-  }
-
-  template <typename Func>
-  void write_access(Func f) {
-    AutoLock a(&m);
-    f(arr, events);
-  }
-  size_t get_events_count() const { return events; }
-
- private:
-  // Cache up to 16 completed events
-  mutable Mutex m;
-  EfiEventImpl *volatile arr[kMaxEventCount];
-  volatile size_t events = 0;
-} completed_events;
 
 lk_time_t backoff_wait_time = 1;
+
+Mutex event_list_mutex;
+
+struct list_node pending_events = LIST_INITIAL_VALUE(pending_events);
+
+void process_pending_events() {
+  AutoLock al{&event_list_mutex};
+  EfiEventImpl *ev = nullptr;
+  list_for_every_entry(&pending_events, ev, EfiEventImpl, node) {
+    if (ev->ready()) {
+      if (!ev->callback_called && ev->notify_fn != nullptr) {
+        LTRACEF("Triggering event %p callback %p %p on thread %s\n", ev,
+                ev->notify_fn, ev->notify_ctx, get_current_thread()->name);
+        backoff_wait_time = 0;
+        ev->notify_fn(ev, ev->notify_ctx);
+        ev->callback_called = true;
+      }
+      if (ev->node.prev != nullptr && ev->node.next != nullptr) {
+        list_delete(&ev->node);
+        return;
+      }
+    }
+  }
+}
+
+void delete_if_in_list(EfiEventImpl *event) {
+  AutoLock al{&event_list_mutex};
+  if (event->node.prev != nullptr && event->node.next != nullptr) {
+    list_delete(&event->node);
+  }
+}
 
 }  // namespace
 
@@ -67,6 +77,8 @@ EfiStatus wait_for_event(size_t num_events, EfiEvent *event, size_t *index) {
     }
   }
   while (true) {
+    // LK currently does not support waiting for multiple events.
+    // So we just have to wait for each event in a poll fashion.
     for (size_t i = 0; i < num_events; i++) {
       EfiEventImpl *ev = reinterpret_cast<EfiEventImpl *>(event[i]);
       if (ev->ready()) {
@@ -86,40 +98,31 @@ EfiStatus wait_for_event(size_t num_events, EfiEvent *event, size_t *index) {
 EfiStatus signal_event(EfiEvent event) {
   LTRACEF("%s(type=0x%x, ready=%d)\n", __FUNCTION__, event->type,
           event->ready());
+  // This function can be called from interrupt context. In interrupt context,
+  // we can't switch thread context, so any blocking APIs such as malloc/free
+  // mutexes, etc. are not allowed.
   if (event->ready()) {
     printf("Event %p already signaled\n", event);
     return SUCCESS;
   }
-  event_signal(&event->ev, true);
+  event_signal(&event->ev, !arch_ints_disabled());
   if ((event->type & NOTIFY_SIGNAL) && event->notify_fn != nullptr) {
     // If this event is signaled on a different thread,  defer
     // calling callbacks until the next check_event call. As UEFI apps
     // are single threaded, we don't want to call event callbacks from another
     // thread
-    if (event->creator_thread != get_current_thread()) {
+    if (event->creator_thread != get_current_thread() || arch_ints_disabled()) {
       LTRACEF(
           "Event %p of type 0x%x is signaled from thread %s, defer notify_fn "
-          "because event is created on thread %s\n",
+          "because event is created on thread %s(or interrupt is disabled)\n",
           event, event->type, get_current_thread()->name,
           event->creator_thread->name);
-      bool success = false;
-      while (!success) {
-        completed_events.write_access(
-            [event, &success](auto &&events, auto &i) {
-              if (i >= kMaxEventCount) {
-                return;
-              }
-              events[i++] = event;
-              success = true;
-            });
-        if (!success) {
-          thread_yield();
-        }
-      }
       return SUCCESS;
     }
     event->notify_fn(event, event->notify_ctx);
     event->callback_called = true;
+    // this is only possible in non-interrupt context, as this requires mutexes.
+    delete_if_in_list(event);
   }
   return SUCCESS;
 }
@@ -127,6 +130,7 @@ EfiStatus signal_event(EfiEvent event) {
 EfiStatus create_event(EfiEventType type, EfiTpl notify_tpl,
                        EfiEventNotify notify_fn, void *notify_ctx,
                        EfiEvent *event) {
+  process_pending_events();
   if ((type & TIMER) != 0) {
     printf("Creating timer event is not supported yet\n");
     return UNSUPPORTED;
@@ -149,6 +153,9 @@ EfiStatus create_event(EfiEventType type, EfiTpl notify_tpl,
   ev->notify_ctx = notify_ctx;
   ev->notify_fn = notify_fn;
   ev->creator_thread = get_current_thread();
+  AutoLock al{&event_list_mutex};
+  list_add_tail(&pending_events, &ev->node);
+
   LTRACEF("Created event 0x%x callback %p %p on thread %s\n", type, notify_fn,
           notify_ctx, get_current_thread()->name);
   *event = ev;
@@ -156,31 +163,17 @@ EfiStatus create_event(EfiEventType type, EfiTpl notify_tpl,
 }
 
 EfiStatus check_event(EfiEvent event) {
-  while (completed_events.get_events_count() > 0) {
-    completed_events.write_access([](auto &&events, auto &count) {
-      for (size_t i = 0; i < count; i++) {
-        EfiEventImpl *ev = events[i];
-        if (!ev->callback_called) {
-          // reset exponential backoff timer
-          LTRACEF("Triggering event %p callback %p %p on thread %s\n", ev,
-                  ev->notify_fn, ev->notify_ctx, get_current_thread()->name);
-          backoff_wait_time = 0;
-          ev->notify_fn(ev, ev->notify_ctx);
-          ev->callback_called = true;
-          events[i] = nullptr;
-        } else {
-          printf("Event %p with callback %p %p already called, unusual\n", ev,
-                 ev->notify_fn, ev->notify_ctx);
-        }
-      }
-      count = 0;
-    });
-  }
-  // Some UEFI applications repeadtely call check_event(NULL) as a way to poll
-  // for completed events. To avoid busy waiting, implement an exponential
-  // backoff strategy if check_event is called repeatdely AND no events in the
-  // system are completed.
+  // Events can get signaled from interrupt context, in which we don't
+  // call the callback. check_event is definitely going to be called
+  // from UEFI app thread, this is a great time to handle any events
+  // that are signaled, but not yet had their callbacks called.
+  process_pending_events();
   if (event == nullptr) {
+    // Some UEFI applications repeadtely call check_event(NULL) as a way to poll
+    // for completed events. To avoid busy waiting, implement an exponential
+    // backoff strategy if check_event is called repeatdely AND no events in the
+    // system are completed.
+
     if (backoff_wait_time == 0) {
       thread_yield();
       backoff_wait_time++;
@@ -193,6 +186,14 @@ EfiStatus check_event(EfiEvent event) {
     return INVALID_PARAMETER;
   }
   if (event->ready()) {
+    if (!event->callback_called && event->notify_fn != nullptr) {
+      LTRACEF("Triggering event %p callback %p %p on thread %s\n", event,
+              event->notify_fn, event->notify_ctx, get_current_thread()->name);
+      backoff_wait_time = 0;
+      event->notify_fn(event, event->notify_ctx);
+      event->callback_called = true;
+    }
+
     return SUCCESS;
   }
   return NOT_READY;
@@ -200,6 +201,7 @@ EfiStatus check_event(EfiEvent event) {
 
 EfiStatus close_event(EfiEvent event) {
   event_destroy(&event->ev);
+  delete_if_in_list(event);
   free(event);
   return SUCCESS;
 }
