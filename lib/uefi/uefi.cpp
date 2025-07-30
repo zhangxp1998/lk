@@ -124,17 +124,20 @@ int load_sections_and_execute(bdev_t *dev,
       reinterpret_cast<EfiConfigurationTable *>(alloc_page(PAGE_SIZE));
   memset(table.configuration_table, 0, PAGE_SIZE);
   setup_configuration_table(&table);
+  setup_heap();
   auto status = platform_setup_system_table(&table);
   if (status != SUCCESS) {
     printf("platform_setup_system_table failed: %lu\n", status);
     return -static_cast<int>(status);
   }
 
-  constexpr size_t kStackSize = 8 * 1024ul * 1024;
+  constexpr size_t kStackSize = 1 * 1024ul * 1024;
   auto stack = reinterpret_cast<char *>(alloc_page(kStackSize, 23));
   memset(stack, 0, kStackSize);
   printf("Calling kernel with stack [%p, %p]\n", stack, stack + kStackSize - 1);
-  return call_with_stack(stack + kStackSize, entry, image_base, &table);
+  auto ret = call_with_stack(stack + kStackSize, entry, image_base, &table);
+  reset_heap();
+  return static_cast<int>(ret);
 }
 
 int cmd_uefi_load(int argc, const console_cmd_args *argv) {

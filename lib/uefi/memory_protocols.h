@@ -7,6 +7,8 @@
 #include <uefi/types.h>
 
 vmm_aspace_t *set_boot_aspace();
+void setup_heap();
+void reset_heap();
 
 void *alloc_page(void *addr, size_t size, size_t align_log2 = PAGE_SIZE_SHIFT);
 void *alloc_page(size_t size, size_t align_log2 = PAGE_SIZE_SHIFT);
