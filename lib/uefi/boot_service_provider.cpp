@@ -54,7 +54,7 @@ EfiStatus handle_protocol(EfiHandle handle, const EfiGuid *protocol,
   if (guid_eq(protocol, LOADED_IMAGE_PROTOCOL_GUID)) {
     printf("handle_protocol(%p, LOADED_IMAGE_PROTOCOL_GUID, %p);\n", handle,
            intf);
-    const auto loaded_image = static_cast<EFI_LOADED_IMAGE_PROTOCOL *>(uefi_malloc(sizeof(EFI_LOADED_IMAGE_PROTOCOL)));
+    const auto loaded_image = static_cast<EfiLoadedImageProtocol *>(uefi_malloc(sizeof(EfiLoadedImageProtocol)));
     if (!loaded_image) {
       return EFI_STATUS_OUT_OF_RESOURCES;
     }

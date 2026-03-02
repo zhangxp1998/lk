@@ -37,7 +37,7 @@ typedef struct {
 } EfiConfigurationTable;
 
 typedef struct EfiSystemTable {
-  const char16_t* firmware_vendor;
+  EfiTableHeader header;
   const char16_t* firmware_vendor;
   uint32_t firmware_revision;
   EfiHandle console_in_handle;

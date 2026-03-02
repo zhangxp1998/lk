@@ -95,6 +95,7 @@ int relocate_image(char *image) {
 
         Fixup += sizeof(uint32_t);
         *Fixup32 = (*Fixup32 & ~0x3ffc00) | (((Value >> 52) & 0xfff) << 10);
+        break;
       }
       default:
         printf("Unsupported relocation type: %d\n", (*Reloc) >> 12);
