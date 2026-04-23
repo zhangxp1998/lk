@@ -41,6 +41,7 @@ void setup_configuration_table(EfiSystemTable *system_table, EfiConfigurationTab
     auto vendor_table = alloc_page(fdt_size);
     dtb.vendor_table = vendor_table;
     memcpy(vendor_table, fdt, fdt_size);
+    printf("LK FDT configured at 1:1 mapped address %p\n", vendor_table);
   }
 
   auto& debug_image_info_table =
