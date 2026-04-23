@@ -28,6 +28,9 @@
 #include <uefi/protocols/erase_block_protocol.h>
 #include <uefi/protocols/gbl_efi_image_loading_protocol.h>
 #include <uefi/protocols/gbl_efi_os_configuration_protocol.h>
+#include <uefi/protocols/gbl_efi_avb_protocol.h>
+#include <uefi/protocols/gbl_efi_boot_control_protocol.h>
+#include <uefi/protocols/random_number_generator_protocol.h>
 #include <uefi/types.h>
 
 #include "defer.h"
@@ -48,20 +51,22 @@ __WEAK EfiStatus efi_dt_fixup(struct EfiDtFixupProtocol* self, void* fdt,
     printf("Failed to find chosen/bootargs prop\n");
     return EFI_STATUS_SUCCESS;
   }
-  char* new_prop_data = reinterpret_cast<char*>(malloc(length));
+  auto prop_length = strnlen(prop->data, length);
+  static constexpr auto&& to_add =
+      "console=ttyAMA0 earlycon=pl011,mmio32,0x9000000 ";
+  size_t new_length = prop_length + sizeof(to_add); // Includes null terminator from to_add implicitly, but we need to ensure it's at the end
+  char* new_prop_data = reinterpret_cast<char*>(malloc(new_length));
   DEFER {
     free(new_prop_data);
     new_prop_data = nullptr;
   };
-  auto prop_length = strnlen(prop->data, length);
-  static constexpr auto&& to_add =
-      "console=ttyAMA0 earlycon=pl011,mmio32,0x9000000 ";
-  memset(new_prop_data, 0, length);
+  memset(new_prop_data, 0, new_length);
   memcpy(new_prop_data, to_add, sizeof(to_add) - 1);
   memcpy(new_prop_data + sizeof(to_add) - 1, prop->data, prop_length);
-  auto ret = fdt_setprop(fdt, offset, "bootargs", new_prop_data, length);
+  new_prop_data[new_length - 1] = '\0'; // Ensure null termination
+  auto ret = fdt_setprop(fdt, offset, "bootargs", new_prop_data, (int)new_length);
 
-  printf("chosen/bootargs: %d %d \"%s\"\n", ret, length, new_prop_data);
+  printf("chosen/bootargs: %d %zu \"%s\"\n", ret, new_length, new_prop_data);
 
   return EFI_STATUS_SUCCESS;
 }
@@ -94,7 +99,10 @@ __WEAK EfiStatus select_device_trees(struct GblEfiOsConfigurationProtocol* self,
                                      GblEfiVerifiedDeviceTree* device_trees) {
   printf("%s(%p, %p %lu)\n", __FUNCTION__, self, device_trees,
          num_device_trees);
-  return EFI_STATUS_UNSUPPORTED;
+  if (num_device_trees > 0) {
+    device_trees[0].selected = true;
+  }
+  return EFI_STATUS_SUCCESS;
 }
 
 __WEAK EfiStatus select_fit_configuration(
@@ -107,6 +115,19 @@ __WEAK EfiStatus select_fit_configuration(
 
 __WEAK EfiStatus exit_boot_services(EfiHandle image_handle, size_t map_key) {
   printf("%s is called\n", __FUNCTION__);
+  // Disable all interrupts and exceptions using DAIFSET
+  __asm__ volatile("msr daifset, #0xf" ::: "memory");
+  
+  // Disable generic timers
+  __asm__ volatile("msr cntv_ctl_el0, xzr");
+  __asm__ volatile("msr cntp_ctl_el0, xzr");
+  
+  // Also disable the GIC distributor to be absolutely sure no interrupts are pending
+  // GICv2 distributor base on QEMU virt is 0x08000000
+  // Wait, in LK it's mapped to 0xffff000780000000
+  uint32_t *gicd_ctlr = (uint32_t *)0xffff000780000000;
+  *gicd_ctlr = 0;
+  
   return EFI_STATUS_SUCCESS;
 }
 
@@ -202,6 +223,138 @@ EfiStatus erase_blocks(EfiEraseBlockProtocol* self, uint32_t media_id,
   return EFI_STATUS_SUCCESS;
 }
 
+EfiStatus avb_read_partition_attributes(
+    struct GblEfiAvbProtocol* self,
+    /* in-out */ size_t* num_partitions,
+    /* in-out */ GblEfiAvbPartitionAttributes* partitions) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_read_device_status(
+    struct GblEfiAvbProtocol* self,
+    /* out */ GblEfiAvbDeviceStatus* status_flags) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_validate_vbmeta_public_key(
+    struct GblEfiAvbProtocol* self,
+    /* in */ size_t public_key_length,
+    /* in */ const uint8_t* public_key_data,
+    /* in */ size_t public_key_metadata_length,
+    /* in */ const uint8_t* public_key_metadata,
+    /* out */ GblEfiAvbKeyValidationStatus* validation_status) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_read_rollback_index(struct GblEfiAvbProtocol* self,
+                                  /* in */ size_t index_location,
+                                  /* out */ uint64_t* rollback_index) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_write_rollback_index(struct GblEfiAvbProtocol* self,
+                                   /* in */ size_t index_location,
+                                   /* in */ uint64_t rollback_index) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_read_persistent_value(struct GblEfiAvbProtocol* self,
+                                    /* in */ const EfiChar8* name,
+                                    /* in-out */ size_t* value_size,
+                                    /* out */ uint8_t* value) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_write_persistent_value(struct GblEfiAvbProtocol* self,
+                                     /* in */ const EfiChar8* name,
+                                     /* in */ size_t value_size,
+                                     /* in */ const uint8_t* value) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_handle_verification_result(
+    struct GblEfiAvbProtocol* self,
+    /* in */ const GblEfiAvbVerificationResult* result) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_write_lock_state(struct GblEfiAvbProtocol* self,
+                               /* in */ GblEfiAvbLockType type,
+                               /* in */ GblEfiAvbLockState state) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus avb_factory_data_reset(struct GblEfiAvbProtocol* self) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus boot_control_get_slot_count(struct GblEfiBootControlProtocol* self,
+                                      uint8_t* slot_count) {
+  if (slot_count == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  *slot_count = 1;
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus boot_control_get_slot_info(struct GblEfiBootControlProtocol* self,
+                                     uint8_t index, GblEfiSlotInfo* info) {
+  if (info == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  if (index > 0) {
+    return EFI_STATUS_NOT_FOUND;
+  }
+  info->suffix = 'a';
+  info->unbootable_reason = GBL_EFI_UNBOOTABLE_REASON_UNKNOWN_REASON;
+  info->priority = 15;
+  info->remaining_tries = 7;
+  info->successful = 1;
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus boot_control_get_current_slot(struct GblEfiBootControlProtocol* self,
+                                        GblEfiSlotInfo* info) {
+  return boot_control_get_slot_info(self, 0, info);
+}
+
+EfiStatus boot_control_set_active_slot(struct GblEfiBootControlProtocol* self,
+                                       uint8_t index) {
+  return EFI_STATUS_UNSUPPORTED;
+}
+
+EfiStatus boot_control_get_one_shot_boot_mode(
+    struct GblEfiBootControlProtocol* self, GblEfiOneShotBootMode* mode) {
+  if (mode == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  *mode = GBL_EFI_ONE_SHOT_BOOT_MODE_NONE;
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus boot_control_handle_loaded_os(struct GblEfiBootControlProtocol* self,
+                                        const GblEfiLoadedOs* os) {
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus rng_get_info(EfiRngProtocol* self, size_t* rng_algorithm_list_size,
+                       EfiRngAlgorithm* rng_algorithm_list) {
+  if (rng_algorithm_list_size == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  *rng_algorithm_list_size = 0;
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus rng_get_rng(EfiRngProtocol* self, const EfiRngAlgorithm* rng_algorithm,
+                      size_t rng_value_length, uint8_t* rng_value) {
+  if (rng_value == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  memset(rng_value, 0, rng_value_length);
+  return EFI_STATUS_SUCCESS;
+}
+
 }  // namespace
 
 __WEAK EfiStatus open_efi_erase_block_protocol(EfiHandle handle, const void** intf) {
@@ -221,4 +374,42 @@ __WEAK EfiStatus open_efi_erase_block_protocol(EfiHandle handle, const void** in
   };
   *intf = p;
   return EFI_STATUS_SUCCESS;
+}
+
+__WEAK GblEfiAvbProtocol* open_gbl_efi_avb_protocol() {
+  static GblEfiAvbProtocol protocol = {
+      .revision = GBL_EFI_AVB_PROTOCOL_REVISION,
+      .read_partition_attributes = avb_read_partition_attributes,
+      .read_device_status = avb_read_device_status,
+      .validate_vbmeta_public_key = avb_validate_vbmeta_public_key,
+      .read_rollback_index = avb_read_rollback_index,
+      .write_rollback_index = avb_write_rollback_index,
+      .read_persistent_value = avb_read_persistent_value,
+      .write_persistent_value = avb_write_persistent_value,
+      .handle_verification_result = avb_handle_verification_result,
+      .write_lock_state = avb_write_lock_state,
+      .factory_data_reset = avb_factory_data_reset,
+  };
+  return &protocol;
+}
+
+__WEAK GblEfiBootControlProtocol* open_gbl_efi_boot_control_protocol() {
+  static GblEfiBootControlProtocol protocol = {
+      .revision = GBL_EFI_BOOT_CONTROL_PROTOCOL_REVISION,
+      .get_slot_count = boot_control_get_slot_count,
+      .get_slot_info = boot_control_get_slot_info,
+      .get_current_slot = boot_control_get_current_slot,
+      .set_active_slot = boot_control_set_active_slot,
+      .get_one_shot_boot_mode = boot_control_get_one_shot_boot_mode,
+      .handle_loaded_os = boot_control_handle_loaded_os,
+  };
+  return &protocol;
+}
+
+__WEAK EfiRngProtocol* open_efi_rng_protocol() {
+  static EfiRngProtocol protocol = {
+      .get_info = rng_get_info,
+      .get_rng = rng_get_rng,
+  };
+  return &protocol;
 }
