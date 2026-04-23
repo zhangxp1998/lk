@@ -103,21 +103,24 @@ __WEAK EfiStatus open_block_device(EfiHandle handle, const void** intf) {
   return EFI_STATUS_SUCCESS;
 }
 
-EfiStatus list_block_devices(size_t *num_handles, EfiHandle **buf) {
+EfiStatus list_block_devices(size_t *num_handles, EfiHandle *buf) {
   size_t device_count = 0;
   bio_iter_devices([&device_count](bdev_t *dev) {
     device_count++;
     return true;
   });
-  auto devices =
-      reinterpret_cast<EfiHandle *>(uefi_malloc(sizeof(EfiHandle) * device_count));
+
+  if (*num_handles < device_count) {
+    *num_handles = device_count;
+    return EFI_STATUS_BUFFER_TOO_SMALL;
+  }
+
   size_t i = 0;
-  bio_iter_devices([&i, devices, device_count](bdev_t *dev) {
-    devices[i] = dev->name;
+  bio_iter_devices([&i, buf, device_count](bdev_t *dev) {
+    buf[i] = dev->name;
     i++;
     return i < device_count;
   });
   *num_handles = i;
-  *buf = devices;
   return EFI_STATUS_SUCCESS;
 }
