@@ -85,4 +85,10 @@ EfiStatus open_efi_erase_block_protocol(EfiHandle handle, const void** intf);
 
 GblEfiBootMemoryProtocol* open_boot_memory_protocol();
 
+struct GblEfiAvbProtocol* open_gbl_efi_avb_protocol();
+
+struct GblEfiBootControlProtocol* open_gbl_efi_boot_control_protocol();
+
+struct EfiRngProtocol* open_efi_rng_protocol();
+
 #endif
