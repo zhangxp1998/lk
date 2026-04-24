@@ -37,8 +37,36 @@
 
 #define LOCAL_TRACE 0
 
+extern "C" const void *get_fdt(void);
+
 __WEAK EfiStatus efi_dt_fixup(struct EfiDtFixupProtocol* self, void* fdt,
                               size_t* buffer_size, uint32_t flags) {
+  // First copy the /memory node from LK's FDT
+  const void *lk_fdt = get_fdt();
+  if (lk_fdt != nullptr) {
+    int len;
+    const void *val;
+    // Copy root #address-cells and #size-cells
+    val = fdt_getprop(lk_fdt, 0, "#address-cells", &len);
+    if (val) fdt_setprop(fdt, 0, "#address-cells", val, len);
+    val = fdt_getprop(lk_fdt, 0, "#size-cells", &len);
+    if (val) fdt_setprop(fdt, 0, "#size-cells", val, len);
+
+    int src_node = fdt_path_offset(lk_fdt, "/memory@40000000");
+    if (src_node >= 0) {
+      int dst_node = fdt_path_offset(fdt, "/memory@40000000");
+      if (dst_node < 0) {
+        dst_node = fdt_add_subnode(fdt, 0, "memory@40000000");
+      }
+      if (dst_node >= 0) {
+        val = fdt_getprop(lk_fdt, src_node, "device_type", &len);
+        if (val) fdt_setprop(fdt, dst_node, "device_type", val, len);
+        val = fdt_getprop(lk_fdt, src_node, "reg", &len);
+        if (val) fdt_setprop(fdt, dst_node, "reg", val, len);
+      }
+    }
+  }
+
   auto offset = fdt_subnode_offset(fdt, 0, "chosen");
   if (offset < 0) {
     printf("Failed to find chosen node %d\n", offset);
