@@ -25,6 +25,8 @@
 #include <lk/trace.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <uefi/protocols/dt_fixup_protocol.h>
 #include <uefi/protocols/erase_block_protocol.h>
 #include <uefi/protocols/gbl_efi_image_loading_protocol.h>
 #include <uefi/protocols/gbl_efi_os_configuration_protocol.h>
@@ -37,34 +39,203 @@
 
 #define LOCAL_TRACE 0
 
+extern "C" const void *get_fdt(void);
+
+namespace {
+
+constexpr size_t kFdtFixupGrowth = 4096;
+constexpr const char kBootargsPrefix[] =
+    "console=ttyAMA0 earlycon=pl011,mmio32,0x9000000 ";
+
+EfiStatus fdt_error_to_efi_status(int err, void *fdt, size_t *buffer_size) {
+  if (err >= 0) {
+    return EFI_STATUS_SUCCESS;
+  }
+  if (err == -FDT_ERR_NOSPACE) {
+    if (fdt != nullptr && buffer_size != nullptr && fdt_check_header(fdt) >= 0) {
+      *buffer_size = fdt_totalsize(fdt) + kFdtFixupGrowth;
+    }
+    return EFI_STATUS_BUFFER_TOO_SMALL;
+  }
+  if (err == -FDT_ERR_NOTFOUND) {
+    return EFI_STATUS_NOT_FOUND;
+  }
+  return EFI_STATUS_DEVICE_ERROR;
+}
+
+EfiStatus copy_optional_fdt_property(const void *src_fdt, int src_node,
+                                     void *dst_fdt, int dst_node,
+                                     const char *property,
+                                     size_t *buffer_size) {
+  int len = 0;
+  const void *val = fdt_getprop(src_fdt, src_node, property, &len);
+  if (val == nullptr) {
+    if (len == -FDT_ERR_NOTFOUND) {
+      return EFI_STATUS_SUCCESS;
+    }
+    printf("Failed to read FDT property %s: %d\n", property, len);
+    return fdt_error_to_efi_status(len, dst_fdt, buffer_size);
+  }
+
+  int ret = fdt_setprop(dst_fdt, dst_node, property, val, len);
+  if (ret < 0) {
+    printf("Failed to set FDT property %s: %d\n", property, ret);
+    return fdt_error_to_efi_status(ret, dst_fdt, buffer_size);
+  }
+  return EFI_STATUS_SUCCESS;
+}
+
+bool is_memory_node(const void *fdt, int node, const char *name) {
+  int len = 0;
+  const char *device_type =
+      static_cast<const char *>(fdt_getprop(fdt, node, "device_type", &len));
+  if (device_type != nullptr && len >= static_cast<int>(strlen("memory")) &&
+      memcmp(device_type, "memory", strlen("memory")) == 0 &&
+      (len == static_cast<int>(strlen("memory")) ||
+       device_type[strlen("memory")] == '\0')) {
+    return true;
+  }
+  return strcmp(name, "memory") == 0 || strncmp(name, "memory@", 7) == 0;
+}
+
+EfiStatus copy_memory_node(const void *src_fdt, int src_node, void *dst_fdt,
+                           size_t *buffer_size) {
+  const char *name = fdt_get_name(src_fdt, src_node, nullptr);
+  if (name == nullptr) {
+    return EFI_STATUS_DEVICE_ERROR;
+  }
+
+  int dst_node = fdt_subnode_offset(dst_fdt, 0, name);
+  if (dst_node == -FDT_ERR_NOTFOUND) {
+    dst_node = fdt_add_subnode(dst_fdt, 0, name);
+  }
+  if (dst_node < 0) {
+    printf("Failed to find/create FDT memory node %s: %d\n", name, dst_node);
+    return fdt_error_to_efi_status(dst_node, dst_fdt, buffer_size);
+  }
+
+  EfiStatus status = copy_optional_fdt_property(src_fdt, src_node, dst_fdt,
+                                                dst_node, "device_type",
+                                                buffer_size);
+  if (status != EFI_STATUS_SUCCESS) {
+    return status;
+  }
+
+  int len = 0;
+  const void *reg = fdt_getprop(src_fdt, src_node, "reg", &len);
+  if (reg == nullptr) {
+    printf("FDT memory node %s has no reg property: %d\n", name, len);
+    return fdt_error_to_efi_status(len, dst_fdt, buffer_size);
+  }
+
+  int ret = fdt_setprop(dst_fdt, dst_node, "reg", reg, len);
+  if (ret < 0) {
+    printf("Failed to set FDT memory node %s reg: %d\n", name, ret);
+    return fdt_error_to_efi_status(ret, dst_fdt, buffer_size);
+  }
+
+  return EFI_STATUS_SUCCESS;
+}
+
+EfiStatus copy_memory_nodes(const void *src_fdt, void *dst_fdt,
+                            size_t *buffer_size) {
+  int status = fdt_check_header(src_fdt);
+  if (status < 0) {
+    printf("Invalid LK FDT: %d\n", status);
+    return fdt_error_to_efi_status(status, dst_fdt, buffer_size);
+  }
+
+  EfiStatus efi_status = copy_optional_fdt_property(
+      src_fdt, 0, dst_fdt, 0, "#address-cells", buffer_size);
+  if (efi_status != EFI_STATUS_SUCCESS) {
+    return efi_status;
+  }
+  efi_status = copy_optional_fdt_property(src_fdt, 0, dst_fdt, 0,
+                                          "#size-cells", buffer_size);
+  if (efi_status != EFI_STATUS_SUCCESS) {
+    return efi_status;
+  }
+
+  int node = 0;
+  fdt_for_each_subnode(node, src_fdt, 0) {
+    const char *name = fdt_get_name(src_fdt, node, nullptr);
+    if (name != nullptr && is_memory_node(src_fdt, node, name)) {
+      efi_status = copy_memory_node(src_fdt, node, dst_fdt, buffer_size);
+      if (efi_status != EFI_STATUS_SUCCESS) {
+        return efi_status;
+      }
+    }
+  }
+  if (node < 0 && node != -FDT_ERR_NOTFOUND) {
+    printf("Failed to walk LK FDT memory nodes: %d\n", node);
+    return fdt_error_to_efi_status(node, dst_fdt, buffer_size);
+  }
+
+  return EFI_STATUS_SUCCESS;
+}
+
+}  // namespace
+
 __WEAK EfiStatus efi_dt_fixup(struct EfiDtFixupProtocol* self, void* fdt,
                               size_t* buffer_size, uint32_t flags) {
+  if (fdt == nullptr || buffer_size == nullptr) {
+    return EFI_STATUS_INVALID_PARAMETER;
+  }
+  if ((flags & EFI_DT_APPLY_FIXUPS) == 0) {
+    return EFI_STATUS_SUCCESS;
+  }
+
+  int ret = fdt_check_header(fdt);
+  if (ret < 0) {
+    printf("Invalid destination FDT: %d\n", ret);
+    return fdt_error_to_efi_status(ret, fdt, buffer_size);
+  }
+
+  const void *lk_fdt = get_fdt();
+  if (lk_fdt != nullptr) {
+    EfiStatus status = copy_memory_nodes(lk_fdt, fdt, buffer_size);
+    if (status != EFI_STATUS_SUCCESS) {
+      return status;
+    }
+  }
+
   auto offset = fdt_subnode_offset(fdt, 0, "chosen");
   if (offset < 0) {
     printf("Failed to find chosen node %d\n", offset);
-    return EFI_STATUS_SUCCESS;
+    return fdt_error_to_efi_status(offset, fdt, buffer_size);
   }
   int length = 0;
   auto prop = fdt_get_property(fdt, offset, "bootargs", &length);
 
-  if (prop == nullptr) {
-    printf("Failed to find chosen/bootargs prop\n");
-    return EFI_STATUS_SUCCESS;
+  size_t prop_length = 0;
+  const char *prop_data = "";
+  if (prop != nullptr) {
+    prop_length = strnlen(prop->data, length);
+    prop_data = prop->data;
+  } else if (length != -FDT_ERR_NOTFOUND) {
+    printf("Failed to find chosen/bootargs prop: %d\n", length);
+    return fdt_error_to_efi_status(length, fdt, buffer_size);
   }
-  char* new_prop_data = reinterpret_cast<char*>(malloc(length));
+  size_t new_length = prop_length + sizeof(kBootargsPrefix);
+  char* new_prop_data = reinterpret_cast<char*>(malloc(new_length));
+  if (new_prop_data == nullptr) {
+    return EFI_STATUS_OUT_OF_RESOURCES;
+  }
   DEFER {
     free(new_prop_data);
     new_prop_data = nullptr;
   };
-  auto prop_length = strnlen(prop->data, length);
-  static constexpr auto&& to_add =
-      "console=ttyAMA0 earlycon=pl011,mmio32,0x9000000 ";
-  memset(new_prop_data, 0, length);
-  memcpy(new_prop_data, to_add, sizeof(to_add) - 1);
-  memcpy(new_prop_data + sizeof(to_add) - 1, prop->data, prop_length);
-  auto ret = fdt_setprop(fdt, offset, "bootargs", new_prop_data, length);
+  memset(new_prop_data, 0, new_length);
+  memcpy(new_prop_data, kBootargsPrefix, sizeof(kBootargsPrefix) - 1);
+  memcpy(new_prop_data + sizeof(kBootargsPrefix) - 1, prop_data, prop_length);
+  new_prop_data[new_length - 1] = '\0';
+  ret = fdt_setprop(fdt, offset, "bootargs", new_prop_data, (int)new_length);
+  if (ret < 0) {
+    printf("Failed to set chosen/bootargs: %d\n", ret);
+    return fdt_error_to_efi_status(ret, fdt, buffer_size);
+  }
 
-  printf("chosen/bootargs: %d %d \"%s\"\n", ret, length, new_prop_data);
+  printf("chosen/bootargs: %d %zu \"%s\"\n", ret, new_length, new_prop_data);
 
   return EFI_STATUS_SUCCESS;
 }
