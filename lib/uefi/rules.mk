@@ -23,12 +23,14 @@ MODULE_SRCS += \
 	$(LOCAL_DIR)/uefi_platform.cpp \
 	$(LOCAL_DIR)/runtime_service_provider.cpp \
 	$(LOCAL_DIR)/switch_stack.S \
+	$(LOCAL_DIR)/linux_boot.S \
 	$(LOCAL_DIR)/configuration_table.cpp \
 	$(LOCAL_DIR)/events.cpp \
 	$(LOCAL_DIR)/io_stack.cpp \
 	$(LOCAL_DIR)/debug_support.cpp \
 	$(LOCAL_DIR)/charset.cpp \
 	$(LOCAL_DIR)/variable_mem.cpp \
+	$(LOCAL_DIR)/linux_load.cpp \
 
 
 include make/module.mk
