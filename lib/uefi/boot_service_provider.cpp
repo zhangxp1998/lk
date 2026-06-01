@@ -37,6 +37,52 @@
 #include "memory_protocols.h"
 #include "uefi_platform.h"
 
+const char *protocol_name(const EfiGuid *protocol) {
+  if (protocol == nullptr) {
+    return nullptr;
+  }
+
+  struct ProtocolGuidName {
+    const EfiGuid *guid;
+    const char *name;
+  };
+  static constexpr ProtocolGuidName kProtocolGuidNames[] = {
+      {&LOADED_IMAGE_PROTOCOL_GUID, "LOADED_IMAGE_PROTOCOL_GUID"},
+      {&EFI_DEVICE_PATH_PROTOCOL_GUID, "EFI_DEVICE_PATH_PROTOCOL_GUID"},
+      {&LINUX_EFI_LOADED_IMAGE_FIXED_GUID,
+       "LINUX_EFI_LOADED_IMAGE_FIXED_GUID"},
+      {&EFI_RNG_PROTOCOL_GUID, "EFI_RNG_PROTOCOL_GUID"},
+      {&EFI_TCG2_PROTOCOL_GUID, "EFI_TCG2_PROTOCOL_GUID"},
+      {&EFI_LOAD_FILE2_PROTOCOL_GUID, "EFI_LOAD_FILE2_PROTOCOL_GUID"},
+      {&EFI_BLOCK_IO_PROTOCOL_GUID, "EFI_BLOCK_IO_PROTOCOL_GUID"},
+      {&EFI_BLOCK_IO2_PROTOCOL_GUID, "EFI_BLOCK_IO2_PROTOCOL_GUID"},
+      {&EFI_TEXT_INPUT_PROTOCOL_GUID, "EFI_TEXT_INPUT_PROTOCOL_GUID"},
+      {&EFI_GBL_OS_CONFIGURATION_PROTOCOL_GUID,
+       "EFI_GBL_OS_CONFIGURATION_PROTOCOL_GUID"},
+      {&EFI_GBL_EFI_IMAGE_LOADING_PROTOCOL_GUID,
+       "EFI_GBL_EFI_IMAGE_LOADING_PROTOCOL_GUID"},
+      {&EFI_GBL_EFI_BOOT_CONTROL_PROTOCOL_GUID,
+       "EFI_GBL_EFI_BOOT_CONTROL_PROTOCOL_GUID"},
+      {&EFI_GBL_EFI_AVB_PROTOCOL_GUID, "EFI_GBL_EFI_AVB_PROTOCOL_GUID"},
+      {&EFI_GBL_EFI_FASTBOOT_PROTOCOL_GUID,
+       "EFI_GBL_EFI_FASTBOOT_PROTOCOL_GUID"},
+      {&EFI_GBL_EFI_FASTBOOT_TRANSPORT_PROTOCOL_GUID,
+       "EFI_GBL_EFI_FASTBOOT_TRANSPORT_PROTOCOL_GUID"},
+      {&EFI_DT_FIXUP_PROTOCOL_GUID, "EFI_DT_FIXUP_PROTOCOL_GUID"},
+      {&EFI_TIMESTAMP_PROTOCOL_GUID, "EFI_TIMESTAMP_PROTOCOL_GUID"},
+      {&EFI_BOOT_MEMORY_PROTOCOL_GUID, "EFI_BOOT_MEMORY_PROTOCOL_GUID"},
+      {&EFI_ERASE_BLOCK_PROTOCOL_GUID, "EFI_ERASE_BLOCK_PROTOCOL_GUID"},
+  };
+
+  for (const auto &entry : kProtocolGuidNames) {
+    if (memcmp(protocol, entry.guid, sizeof(*protocol)) == 0) {
+      return entry.name;
+    }
+  }
+
+  return nullptr;
+}
+
 namespace {
 
 EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **intf,
@@ -46,6 +92,43 @@ EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **
 EfiStatus locate_handle_buffer(EfiLocateHandleSearchType search_type,
                                const EfiGuid *protocol, const void *search_key,
                                size_t *num_handles, EfiHandle **buf);
+
+void print_protocol(const EfiGuid *protocol) {
+  const char *name = protocol_name(protocol);
+  if (name != nullptr) {
+    printf("%s", name);
+    return;
+  }
+
+  if (protocol == nullptr) {
+    printf("nullptr");
+    return;
+  }
+
+  uint64_t data4 = 0;
+  memcpy(&data4, protocol->data4, sizeof(data4));
+  printf("(0x%x 0x%x 0x%x 0x%llx)", protocol->data1, protocol->data2,
+         protocol->data3, static_cast<unsigned long long>(data4));
+}
+
+void print_open_protocol_call(const char *function, const EfiGuid *protocol,
+                              EfiHandle handle, EfiHandle agent_handle,
+                              EfiHandle controller_handle,
+                              EfiOpenProtocolAttributes attr) {
+  printf("%s(", function);
+  print_protocol(protocol);
+  printf(", handle=%p, agent_handle=%p, controller_handle=%p, attr=0x%x)\n",
+         handle, agent_handle, controller_handle, attr);
+}
+
+void print_close_protocol_call(const char *function, const EfiGuid *protocol,
+                               EfiHandle handle, EfiHandle agent_handle,
+                               EfiHandle controller_handle) {
+  printf("%s(", function);
+  print_protocol(protocol);
+  printf(", handle=%p, agent_handle=%p, controller_handle=%p)\n", handle,
+         agent_handle, controller_handle);
+}
 
 EfiStatus unload(EfiHandle handle) { return EFI_STATUS_SUCCESS; }
 
@@ -79,8 +162,9 @@ EfiHandle singleton_protocol_handle(const EfiGuid *protocol) {
 EfiStatus handle_protocol(EfiHandle handle, const EfiGuid *protocol,
                           void **intf) {
   if (guid_eq(protocol, LOADED_IMAGE_PROTOCOL_GUID)) {
-    printf("handle_protocol(%p, LOADED_IMAGE_PROTOCOL_GUID, %p);\n", handle,
-           intf);
+    printf("%s(%p, ", __FUNCTION__, handle);
+    print_protocol(protocol);
+    printf(", %p);\n", intf);
     const auto loaded_image = static_cast<EfiLoadedImageProtocol *>(uefi_malloc(sizeof(EfiLoadedImageProtocol)));
     if (!loaded_image) {
       return EFI_STATUS_OUT_OF_RESOURCES;
@@ -97,18 +181,23 @@ EfiStatus handle_protocol(EfiHandle handle, const EfiGuid *protocol,
     *intf = loaded_image;
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, LINUX_EFI_LOADED_IMAGE_FIXED_GUID)) {
-    printf("handle_protocol(%p, LINUX_EFI_LOADED_IMAGE_FIXED_GUID, %p);\n",
-           handle, intf);
+    printf("%s(%p, ", __FUNCTION__, handle);
+    print_protocol(protocol);
+    printf(", %p);\n", intf);
     return EFI_STATUS_UNSUPPORTED;
   } else {
-    printf("handle_protocol(%p, %p, %p);\n", handle, protocol, intf);
+    printf("%s(%p, ", __FUNCTION__, handle);
+    print_protocol(protocol);
+    printf(", %p);\n", intf);
   }
   return EFI_STATUS_UNSUPPORTED;
 }
 
 EfiStatus register_protocol_notify(const EfiGuid *protocol, EfiEvent event,
                                    void **registration) {
-  printf("%s is unsupported\n", __FUNCTION__);
+  printf("%s(", __FUNCTION__);
+  print_protocol(protocol);
+  printf(", event=%p, registration=%p) is unsupported\n", event, registration);
   return EFI_STATUS_UNSUPPORTED;
 }
 
@@ -126,19 +215,22 @@ EfiStatus locate_handle(EfiLocateHandleSearchType search_type,
       *buf_size = num_handles * sizeof(EfiHandle);
       return status;
     }
-    printf("%s(0x%x, EFI_BLOCK_IO_PROTOCOL_GUID, search_key=%p)\n",
-           __FUNCTION__, search_type, search_key);
+    printf("%s(0x%x, ", __FUNCTION__, search_type);
+    print_protocol(protocol);
+    printf(", search_key=%p)\n", search_key);
     return EFI_STATUS_UNSUPPORTED;
   } else if (guid_eq(protocol, EFI_TEXT_INPUT_PROTOCOL_GUID)) {
-    printf("%s(0x%x, EFI_TEXT_INPUT_PROTOCOL_GUID, search_key=%p)\n",
-           __FUNCTION__, search_type, search_key);
+    printf("%s(0x%x, ", __FUNCTION__, search_type);
+    print_protocol(protocol);
+    printf(", search_key=%p)\n", search_key);
     return EFI_STATUS_NOT_FOUND;
   }
 
   const EfiHandle singleton_handle = singleton_protocol_handle(protocol);
   if (singleton_handle != nullptr) {
-    printf("%s(0x%x, %p, search_key=%p)\n", __FUNCTION__, search_type, protocol,
-           search_key);
+    printf("%s(0x%x, ", __FUNCTION__, search_type);
+    print_protocol(protocol);
+    printf(", search_key=%p)\n", search_key);
 
     const size_t required_size = sizeof(EfiHandle);
     if (*buf_size < required_size) {
@@ -153,9 +245,9 @@ EfiStatus locate_handle(EfiLocateHandleSearchType search_type,
     return EFI_STATUS_SUCCESS;
   }
 
-  printf("%s(0x%x, (0x%x 0x%x 0x%x 0x%llx), search_key=%p)\n", __FUNCTION__,
-         search_type, protocol->data1, protocol->data2, protocol->data3,
-         *(uint64_t *)&protocol->data4, search_key);
+  printf("%s(0x%x, ", __FUNCTION__, search_type);
+  print_protocol(protocol);
+  printf(", search_key=%p)\n", search_key);
   return EFI_STATUS_NOT_FOUND;
 }
 
@@ -172,17 +264,21 @@ EfiStatus locate_protocol(const EfiGuid *protocol, void *registration,
   }
 
   if (memcmp(protocol, &EFI_RNG_PROTOCOL_GUID, sizeof(*protocol)) == 0) {
-    printf("%s(EFI_RNG_PROTOCOL_GUID) is unsupported.\n", __FUNCTION__);
+    printf("%s(", __FUNCTION__);
+    print_protocol(protocol);
+    printf(") is unsupported.\n");
     return EFI_STATUS_UNSUPPORTED;
   }
   if (memcmp(protocol, &EFI_TCG2_PROTOCOL_GUID, sizeof(*protocol)) == 0) {
-    printf("%s(EFI_TCG2_PROTOCOL_GUID) is unsupported.\n", __FUNCTION__);
+    printf("%s(", __FUNCTION__);
+    print_protocol(protocol);
+    printf(") is unsupported.\n");
     return EFI_STATUS_NOT_FOUND;
   }
 
-  printf("%s(%x %x %x %llx) is unsupported\n", __FUNCTION__, protocol->data1,
-         protocol->data2, protocol->data3,
-         *reinterpret_cast<const uint64_t *>(&protocol->data4));
+  printf("%s(", __FUNCTION__);
+  print_protocol(protocol);
+  printf(") is unsupported\n");
   return EFI_STATUS_NOT_FOUND;
 }
 
@@ -197,7 +293,9 @@ EfiStatus calculate_crc32(void *data, size_t len, uint32_t *crc32) {
 
 EfiStatus uninstall_protocol_interface(EfiHandle handle,
                                        const EfiGuid *protocol, void *intf) {
-  printf("%s is unsupported\n", __FUNCTION__);
+  printf("%s(", __FUNCTION__);
+  print_protocol(protocol);
+  printf(", handle=%p, intf=%p) is unsupported\n", handle, intf);
   return EFI_STATUS_UNSUPPORTED;
 }
 
@@ -214,7 +312,9 @@ EfiStatus locate_device_path(const EfiGuid *protocol,
              sizeof(EFI_LOAD_FILE2_PROTOCOL_GUID)) == 0) {
     return EFI_STATUS_NOT_FOUND;
   }
-  printf("%s is unsupported\n", __FUNCTION__);
+  printf("%s(", __FUNCTION__);
+  print_protocol(protocol);
+  printf(") is unsupported\n");
   return EFI_STATUS_UNSUPPORTED;
 }
 
@@ -247,29 +347,24 @@ EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **
     interface->parent_handle = handle;
     interface->image_base = handle;
     *intf = interface;
-    printf("%s(LOADED_IMAGE_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_DEVICE_PATH_PROTOCOL_GUID)) {
-    printf("%s(EFI_DEVICE_PATH_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return EFI_STATUS_UNSUPPORTED;
   } else if (guid_eq(protocol, EFI_BLOCK_IO_PROTOCOL_GUID)) {
-    printf("%s(EFI_BLOCK_IO_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return open_block_device(handle, intf);
   } else if (guid_eq(protocol, EFI_BLOCK_IO2_PROTOCOL_GUID)) {
-    printf("%s(EFI_BLOCK_IO2_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return open_async_block_device(handle, intf);
   } else if (guid_eq(protocol, EFI_DT_FIXUP_PROTOCOL_GUID)) {
-    printf("%s(EFI_DT_FIXUP_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     if (intf != nullptr) {
       EfiDtFixupProtocol *fixup = nullptr;
       allocate_pool(EFI_MEMORY_TYPE_BOOT_SERVICES_DATA, sizeof(EfiDtFixupProtocol),
@@ -283,10 +378,8 @@ EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **
     }
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_GBL_OS_CONFIGURATION_PROTOCOL_GUID)) {
-    printf("%s(EFI_GBL_OS_CONFIGURATION_PROTOCOL_GUID, handle=%p, "
-           "agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     GblEfiOsConfigurationProtocol *config = nullptr;
     allocate_pool(EFI_MEMORY_TYPE_BOOT_SERVICES_DATA, sizeof(*config),
                   reinterpret_cast<void **>(&config));
@@ -300,15 +393,12 @@ EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **
     *intf = reinterpret_cast<void *>(config);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_GBL_EFI_IMAGE_LOADING_PROTOCOL_GUID)) {
-    printf(
-        "%s(EFI_GBL_EFI_IMAGE_LOADING_PROTOCOL_GUID, handle=%p, "
-        "agent_handle%p, controller_handle=%p, attr=0x%x)\n",
-        __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return EFI_STATUS_UNSUPPORTED;
   } else if (guid_eq(protocol, EFI_TIMESTAMP_PROTOCOL_GUID)) {
-    printf("%s(EFI_TIMESTAMP_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     EfiTimestampProtocol *ts = reinterpret_cast<EfiTimestampProtocol *>(
         uefi_malloc(sizeof(EfiTimestampProtocol)));
     if (ts == nullptr) {
@@ -319,81 +409,70 @@ EfiStatus open_protocol(EfiHandle handle, const EfiGuid *protocol, const void **
     *intf = reinterpret_cast<void *>(ts);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_ERASE_BLOCK_PROTOCOL_GUID)) {
-    printf("%s(EFI_ERASE_BLOCK_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p, attr=0x%x)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     return open_efi_erase_block_protocol(handle, intf);
   } else if (guid_eq(protocol, EFI_BOOT_MEMORY_PROTOCOL_GUID)) {
-    printf(
-        "%s(EFI_BOOT_MEMORY_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-        "controller_handle=%p, attr=0x%x)\n",
-        __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     *intf = open_boot_memory_protocol();
     if (*intf == nullptr) {
       return EFI_STATUS_OUT_OF_RESOURCES;
     }
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_GBL_EFI_AVB_PROTOCOL_GUID)) {
-    printf(
-        "%s(EFI_GBL_EFI_AVB_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-        "controller_handle=%p, attr=0x%x)\n",
-        __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     *intf = open_gbl_efi_avb_protocol();
     if (*intf == nullptr) {
       return EFI_STATUS_OUT_OF_RESOURCES;
     }
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_GBL_EFI_BOOT_CONTROL_PROTOCOL_GUID)) {
-    printf(
-        "%s(EFI_GBL_EFI_BOOT_CONTROL_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-        "controller_handle=%p, attr=0x%x)\n",
-        __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     *intf = open_gbl_efi_boot_control_protocol();
     if (*intf == nullptr) {
       return EFI_STATUS_OUT_OF_RESOURCES;
     }
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_RNG_PROTOCOL_GUID)) {
-    printf(
-        "%s(EFI_RNG_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-        "controller_handle=%p, attr=0x%x)\n",
-        __FUNCTION__, handle, agent_handle, controller_handle, attr);
+    print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                             controller_handle, attr);
     *intf = open_efi_rng_protocol();
     if (*intf == nullptr) {
       return EFI_STATUS_OUT_OF_RESOURCES;
     }
     return EFI_STATUS_SUCCESS;
   }
-  printf("%s is unsupported 0x%x 0x%x 0x%x 0x%llx\n", __FUNCTION__,
-         protocol->data1, protocol->data2, protocol->data3,
-         *(uint64_t *)&protocol->data4);
+  print_open_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                           controller_handle, attr);
+  printf("%s is unsupported\n", __FUNCTION__);
   return EFI_STATUS_UNSUPPORTED;
 }
 
 EfiStatus close_protocol(EfiHandle handle, const EfiGuid *protocol,
                          EfiHandle agent_handle, EfiHandle controller_handle) {
   if (guid_eq(protocol, LOADED_IMAGE_PROTOCOL_GUID)) {
-    printf("%s(LOADED_IMAGE_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle);
+    print_close_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                              controller_handle);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_DEVICE_PATH_PROTOCOL_GUID)) {
-    printf("%s(EFI_DEVICE_PATH_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle);
+    print_close_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                              controller_handle);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_BLOCK_IO_PROTOCOL_GUID)) {
-    printf("%s(EFI_BLOCK_IO_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle);
+    print_close_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                              controller_handle);
     return EFI_STATUS_SUCCESS;
   } else if (guid_eq(protocol, EFI_DT_FIXUP_PROTOCOL_GUID)) {
-    printf("%s(EFI_DT_FIXUP_PROTOCOL_GUID, handle=%p, agent_handle=%p, "
-           "controller_handle=%p)\n",
-           __FUNCTION__, handle, agent_handle, controller_handle);
+    print_close_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                              controller_handle);
     return EFI_STATUS_SUCCESS;
   }
-  printf("%s is called\n", __FUNCTION__);
+  print_close_protocol_call(__FUNCTION__, protocol, handle, agent_handle,
+                            controller_handle);
+  printf("%s is unsupported\n", __FUNCTION__);
   return EFI_STATUS_UNSUPPORTED;
 }
 

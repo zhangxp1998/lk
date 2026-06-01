@@ -21,6 +21,7 @@
 #include <uefi/system_table.h>
 
 void setup_boot_service_table(EfiBootService *service);
+const char *protocol_name(const EfiGuid *protocol);
 
 static constexpr auto LOADED_IMAGE_PROTOCOL_GUID =
     EfiGuid{0x5b1b31a1,
