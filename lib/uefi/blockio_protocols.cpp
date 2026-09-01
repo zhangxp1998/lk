@@ -18,6 +18,7 @@
 
 #include <kernel/vm.h>
 #include <lib/bio.h>
+#include <lk/list.h>
 #include <malloc.h>
 #include <string.h>
 #include <uefi/protocols/block_io_protocol.h>
@@ -77,20 +78,39 @@ EfiStatus reset(EfiBlockIoProtocol *self, bool extended_verification) {
 }  // namespace
 
 namespace {
-// Every bio_open() for the current image run is tracked so its reference can be
-// released at teardown by close_tracked_bdevs(). This is a growable list rather
-// than a fixed array on purpose: close_protocol() does not release individual
-// Block I/O references, so the tracker counts cumulative opens, and a bounded
-// table would reject opens after enough OpenProtocol/CloseProtocol cycles.
+// Each distinct bdev opened during the current image run is tracked once, with
+// a count of how many UEFI opens are still outstanding. Reusing an already-open
+// device keeps the list bounded by the number of bdevs rather than the
+// cumulative number of OpenProtocol calls. The underlying bio reference is
+// taken on the first open and released by close_tracked_bdev() when the last
+// open closes, or by close_tracked_bdevs() at teardown.
 struct TrackedBdev {
+  list_node node;
   bdev_t *dev;
-  TrackedBdev *next;
+  size_t open_count;
 };
-TrackedBdev *tracked_bdevs = nullptr;
+list_node tracked_bdevs = LIST_INITIAL_VALUE(tracked_bdevs);
+
+TrackedBdev *find_tracked_bdev(const char *name) {
+  TrackedBdev *entry;
+  list_for_every_entry(&tracked_bdevs, entry, TrackedBdev, node) {
+    if (strcmp(entry->dev->name, name) == 0) {
+      return entry;
+    }
+  }
+  return nullptr;
+}
 }  // namespace
 
 EfiStatus open_tracked_bdev(const char *name, bdev_t **out_dev) {
   *out_dev = nullptr;
+  // Reuse a device that is already open so repeated OpenProtocol calls share a
+  // single bio reference and tracking node instead of growing the list.
+  if (TrackedBdev *existing = find_tracked_bdev(name)) {
+    existing->open_count++;
+    *out_dev = existing->dev;
+    return EFI_STATUS_SUCCESS;
+  }
   bdev_t *dev = bio_open(name);
   if (dev == nullptr) {
     return EFI_STATUS_NOT_FOUND;
@@ -102,32 +122,35 @@ EfiStatus open_tracked_bdev(const char *name, bdev_t **out_dev) {
     bio_close(dev);
     return EFI_STATUS_OUT_OF_RESOURCES;
   }
+  node->node = LIST_INITIAL_CLEARED_VALUE;
   node->dev = dev;
-  node->next = tracked_bdevs;
-  tracked_bdevs = node;
+  node->open_count = 1;
+  list_add_tail(&tracked_bdevs, &node->node);
   *out_dev = dev;
   return EFI_STATUS_SUCCESS;
 }
 
 bool close_tracked_bdev(const char *name) {
-  for (TrackedBdev **pp = &tracked_bdevs; *pp != nullptr; pp = &(*pp)->next) {
-    if (strcmp((*pp)->dev->name, name) == 0) {
-      TrackedBdev *node = *pp;
-      *pp = node->next;
-      bio_close(node->dev);
-      free(node);
-      return true;
-    }
+  TrackedBdev *entry = find_tracked_bdev(name);
+  if (entry == nullptr) {
+    return false;
   }
-  return false;
+
+  // Release the bio reference only once the last outstanding open closes.
+  if (--entry->open_count == 0) {
+    list_delete(&entry->node);
+    bio_close(entry->dev);
+    free(entry);
+  }
+  return true;
 }
 
 void close_tracked_bdevs() {
-  while (tracked_bdevs != nullptr) {
-    TrackedBdev *node = tracked_bdevs;
-    tracked_bdevs = node->next;
-    bio_close(node->dev);
-    free(node);
+  TrackedBdev *entry;
+  while ((entry = list_remove_head_type(&tracked_bdevs, TrackedBdev, node)) !=
+         nullptr) {
+    bio_close(entry->dev);
+    free(entry);
   }
 }
 
